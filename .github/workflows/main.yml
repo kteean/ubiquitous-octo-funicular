@@ -1,0 +1,16 @@
+- name: Create RDP User with Secure Password
+        shell: pwsh
+        run: |
+          $password = "P@$$word"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          # Recreate user safely
+          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name "RDP"
+          }
+          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+
+          # Export credentials for workflow output
+          "RDP_CREDS=User: RDP | Password: $password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
