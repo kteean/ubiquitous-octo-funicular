@@ -1,16 +1,106 @@
-- name: Create RDP User with Secure Password
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Configure RDP + Clipboard + File Transfer
+        shell: pwsh
+        run: |
+          # Enable RDP
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          # Enable Clipboard Sharing
+          Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "fDisableClip" -Value 0 -Force
+
+          # Enable File Transfer (Drive Redirection)
+          Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "fDisableCdm" -Value 0 -Force
+
+          # Firewall rule
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" >$null 2>&1
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service TermService -Force
+
+      - name: Create RDP User (Fixed Password)
         shell: pwsh
         run: |
           $password = "P@$$word"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Recreate user safely
           if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
               Remove-LocalUser -Name "RDP"
           }
+
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
-          # Export credentials for workflow output
-          "RDP_CREDS=User: RDP | Password: $password" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # DO NOT print password in logs
+          Add-Content -Path $env:GITHUB_ENV -Value "RDP_USER=RDP"
+          Add-Content -Path $env:GITHUB_ENV -Value "RDP_PASS=$password"
+
+      - name: Enable Auto-Login
+        shell: pwsh
+        run: |
+          $username = "RDP"
+          $password = "P@$$word"
+
+          Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" "AutoAdminLogon" -Value "1"
+          Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" "DefaultUserName" -Value $username
+          Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" "DefaultPassword" -Value $password
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $msi = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+          Remove-Item $msi -Force
+
+      - name: Connect to Tailscale
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          for ($i=0; $i -lt 10; $i++) {
+              $tsIP = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim()
+              if ($tsIP) { break }
+              Start-Sleep 5
+          }
+
+          if (-not $tsIP) { throw "Tailscale IP not assigned" }
+
+          Add-Content -Path $env:GITHUB_ENV -Value "TAILSCALE_IP=$tsIP"
+
+      - name: Verify RDP
+        shell: pwsh
+        run: |
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $result.TcpTestSucceeded) { throw "RDP Port 3389 not reachable" }
+
+      - name: Keep Runner Alive
+        shell: pwsh
+        run: |
+          Write-Host "=============================="
+          Write-Host "  RDP CONNECT INFORMATION"
+          Write-Host "=============================="
+          Write-Host "IP Address: $env:TAILSCALE_IP"
+          Write-Host "User: $env:RDP_USER"
+          Write-Host "Password: ******** (hidden)"
+          Write-Host "=============================="
+
+          while ($true) {
+              Start-Sleep 300
+          }
