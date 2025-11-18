@@ -98,7 +98,7 @@ jobs:
           Write-Host "=============================="
           Write-Host "IP Address: $env:TAILSCALE_IP"
           Write-Host "User: $env:RDP_USER"
-          Write-Host "Password: ******** (hidden)"
+          Write-Host "Password: $env:password"
           Write-Host "=============================="
 
           while ($true) {
